@@ -72,31 +72,38 @@ def broker_request(
 
 def upload_once(source_url: str, filename: str, api_key: str) -> tuple[str, int]:
     mask(api_key)
-    with requests.get(
-        source_url,
-        stream=True,
-        allow_redirects=True,
-        headers={"Accept-Encoding": "identity", "User-Agent": "OpaquePixelDrainAction/1.0"},
-        timeout=(30, 300),
-    ) as source:
-        source.raise_for_status()
+    try:
+        source_request = requests.get(
+            source_url,
+            stream=True,
+            allow_redirects=True,
+            headers={"Accept-Encoding": "identity", "User-Agent": "OpaquePixelDrainAction/1.0"},
+            timeout=(30, 300),
+        )
+        source_request.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError("source_download_failed") from exc
+    with source_request as source:
         size = int(source.headers.get("Content-Length") or 0)
         if size <= 0 or size > MAX_UPLOAD_BYTES:
             raise RuntimeError("Source size is unavailable or exceeds the configured limit.")
         encoded_key = base64.b64encode(f":{api_key}".encode("utf-8")).decode("ascii")
         safe_name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", filename)[:220] or "media"
-        response = requests.put(
-            f"https://pixeldrain.com/api/file/{quote(safe_name)}",
-            data=source.iter_content(chunk_size=CHUNK_BYTES),
-            headers={
-                "Authorization": f"Basic {encoded_key}",
-                "Content-Type": source.headers.get("Content-Type") or "application/octet-stream",
-                "Content-Length": str(size),
-                "Accept": "application/json",
-                "User-Agent": "OpaquePixelDrainAction/1.0",
-            },
-            timeout=(30, 3600),
-        )
+        try:
+            response = requests.put(
+                f"https://pixeldrain.com/api/file/{quote(safe_name)}",
+                data=source.iter_content(chunk_size=CHUNK_BYTES),
+                headers={
+                    "Authorization": f"Basic {encoded_key}",
+                    "Content-Type": source.headers.get("Content-Type") or "application/octet-stream",
+                    "Content-Length": str(size),
+                    "Accept": "application/json",
+                    "User-Agent": "OpaquePixelDrainAction/1.0",
+                },
+                timeout=(30, 3600),
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError("pixeldrain_upload_failed") from exc
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
     if not response.ok or payload.get("success") is False:
         raise RuntimeError("PixelDrain rejected the upload.")
@@ -121,7 +128,7 @@ def run_job(job: dict[str, object]) -> dict[str, object]:
             mask(url)
             return {"ok": True, "pixeldrain_url": url, "size_bytes": size}
         except Exception as exc:  # Do not reveal provider responses in public logs.
-            last_error = f"{type(exc).__name__}."
+            last_error = str(exc)[:120] or f"{type(exc).__name__}."
     return {"ok": False, "error": last_error}
 
 
