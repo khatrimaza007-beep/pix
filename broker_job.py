@@ -8,6 +8,7 @@ import base64
 import os
 import re
 import sys
+import tempfile
 from urllib.parse import quote
 
 import requests
@@ -98,23 +99,41 @@ def upload_once(source_url: str, filename: str, api_key: str) -> tuple[str, int]
                 size = int(match.group(1)) if match else 0
             except requests.RequestException:
                 size = 0
-        if size <= 0 or size > MAX_UPLOAD_BYTES:
-            raise RuntimeError("Source size is unavailable or exceeds the configured limit.")
+        if size > MAX_UPLOAD_BYTES:
+            raise RuntimeError("Source exceeds the configured size limit.")
         encoded_key = base64.b64encode(f":{api_key}".encode("utf-8")).decode("ascii")
         safe_name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", filename)[:220] or "media"
-        try:
-            response = requests.put(
+        def send_upload(body: object, content_length: int) -> requests.Response:
+            return requests.put(
                 f"https://pixeldrain.com/api/file/{quote(safe_name)}",
-                data=source.iter_content(chunk_size=CHUNK_BYTES),
+                data=body,
                 headers={
                     "Authorization": f"Basic {encoded_key}",
                     "Content-Type": source.headers.get("Content-Type") or "application/octet-stream",
-                    "Content-Length": str(size),
+                    "Content-Length": str(content_length),
                     "Accept": "application/json",
                     "User-Agent": "OpaquePixelDrainAction/1.0",
                 },
                 timeout=(30, 3600),
             )
+
+        try:
+            if size > 0:
+                response = send_upload(source.iter_content(chunk_size=CHUNK_BYTES), size)
+            else:
+                with tempfile.TemporaryFile() as staged:
+                    size = 0
+                    for chunk in source.iter_content(chunk_size=CHUNK_BYTES):
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if size > MAX_UPLOAD_BYTES:
+                            raise RuntimeError("Source exceeds the configured size limit.")
+                        staged.write(chunk)
+                    if size <= 0:
+                        raise RuntimeError("Source download was empty.")
+                    staged.seek(0)
+                    response = send_upload(staged, size)
         except requests.RequestException as exc:
             raise RuntimeError("pixeldrain_upload_failed") from exc
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
