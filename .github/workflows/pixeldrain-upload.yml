@@ -1,0 +1,37 @@
+name: PixelDrain Upload
+
+run-name: PixelDrain job ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Opaque broker job identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pixeldrain-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependency
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Run opaque broker job
+        env:
+          BROKER_URL: ${{ vars.PIXELDRAIN_BROKER_URL }}
+        run: |
+          test -n "$BROKER_URL"
+          python broker_job.py --broker-url "$BROKER_URL" --job-id "${{ inputs.job_id }}"
