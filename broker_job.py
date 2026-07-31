@@ -85,6 +85,19 @@ def upload_once(source_url: str, filename: str, api_key: str) -> tuple[str, int]
         raise RuntimeError("source_download_failed") from exc
     with source_request as source:
         size = int(source.headers.get("Content-Length") or 0)
+        if size <= 0:
+            try:
+                probe = requests.get(
+                    source_url,
+                    headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
+                    allow_redirects=True,
+                    timeout=(30, 60),
+                )
+                content_range = probe.headers.get("Content-Range") or ""
+                match = re.search(r"/(\d+)$", content_range)
+                size = int(match.group(1)) if match else 0
+            except requests.RequestException:
+                size = 0
         if size <= 0 or size > MAX_UPLOAD_BYTES:
             raise RuntimeError("Source size is unavailable or exceeds the configured limit.")
         encoded_key = base64.b64encode(f":{api_key}".encode("utf-8")).decode("ascii")
