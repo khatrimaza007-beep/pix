@@ -136,7 +136,9 @@ def upload_staged_file(staged_path: str, filename: str, size: int, api_key: str)
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
     if not response.ok or payload.get("success") is False:
         raise RuntimeError("PixelDrain rejected the upload.")
-    file_id = str(payload.get("id") or "")
+    # PixelDrain can append quota metadata after a comma. The public URL uses
+    # only the leading file ID.
+    file_id = str(payload.get("id") or "").split(",", 1)[0].strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
         raise RuntimeError("PixelDrain did not return a valid file ID.")
     return f"https://pixeldrain.com/u/{file_id}", size
