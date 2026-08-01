@@ -65,7 +65,19 @@ def broker_request(
         timeout=60,
     )
     if response.status_code >= 400:
-        raise RuntimeError(f"Broker returned HTTP {response.status_code}.")
+        detail = ""
+        if response.status_code == 400:
+            try:
+                value = response.json()
+                if isinstance(value, dict):
+                    shape = value.get("shape")
+                    if isinstance(shape, dict):
+                        detail = "; " + ", ".join(
+                            f"{key}={value}" for key, value in sorted(shape.items())
+                        )
+            except ValueError:
+                pass
+        raise RuntimeError(f"Broker returned HTTP {response.status_code}{detail}.")
     value = response.json()
     if not isinstance(value, dict):
         raise RuntimeError("Broker returned an invalid response.")
