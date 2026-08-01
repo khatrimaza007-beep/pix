@@ -115,26 +115,24 @@ def stage_source(source_url: str, filename: str, directory: str) -> tuple[str, i
     return destination, size
 
 
-def upload_once(source_url: str, filename: str, api_key: str) -> tuple[str, int]:
+def upload_staged_file(staged_path: str, filename: str, size: int, api_key: str) -> str:
     mask(api_key)
-    with tempfile.TemporaryDirectory(prefix="pixeldrain-") as directory:
-        staged_path, size = stage_source(source_url, filename, directory)
-        try:
-            with open(staged_path, "rb") as staged:
-                response = requests.put(
-                    f"https://pixeldrain.com/api/file/{quote(safe_filename(filename))}",
-                    auth=("", api_key),
-                    data=staged,
-                    headers={
-                        "Content-Length": str(size),
-                        "Content-Type": "application/octet-stream",
-                        "Accept": "application/json",
-                        "User-Agent": "OpaquePixelDrainAction/2.0",
-                    },
-                    timeout=(30, 4 * 60 * 60),
-                )
-        except requests.RequestException as exc:
-            raise RuntimeError("pixeldrain_upload_failed") from exc
+    try:
+        with open(staged_path, "rb") as staged:
+            response = requests.put(
+                f"https://pixeldrain.com/api/file/{quote(safe_filename(filename))}",
+                auth=("", api_key),
+                data=staged,
+                headers={
+                    "Content-Length": str(size),
+                    "Content-Type": "application/octet-stream",
+                    "Accept": "application/json",
+                    "User-Agent": "OpaquePixelDrainAction/2.0",
+                },
+                timeout=(30, 4 * 60 * 60),
+            )
+    except requests.RequestException as exc:
+        raise RuntimeError("pixeldrain_upload_failed") from exc
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
     if not response.ok or payload.get("success") is False:
         raise RuntimeError("PixelDrain rejected the upload.")
@@ -154,18 +152,23 @@ def run_job(job: dict[str, object]) -> dict[str, object]:
     mask(filename)
     last_error = "PixelDrain upload failed."
     started = time.monotonic()
-    for key in keys:
-        try:
-            url, size = upload_once(source_url, filename, key)
-            mask(url)
-            return {
-                "ok": True,
-                "pixeldrain_url": url,
-                "size_bytes": size,
-                "elapsed_seconds": round(time.monotonic() - started, 2),
-            }
-        except Exception as exc:  # Do not reveal provider responses in public logs.
-            last_error = str(exc)[:120] or f"{type(exc).__name__}."
+    try:
+        with tempfile.TemporaryDirectory(prefix="pixeldrain-") as directory:
+            staged_path, size = stage_source(source_url, filename, directory)
+            for key in keys:
+                try:
+                    url = upload_staged_file(staged_path, filename, size, key)
+                    mask(url)
+                    return {
+                        "ok": True,
+                        "pixeldrain_url": url,
+                        "size_bytes": size,
+                        "elapsed_seconds": round(time.monotonic() - started, 2),
+                    }
+                except Exception as exc:  # Do not reveal provider responses in public logs.
+                    last_error = str(exc)[:120] or f"{type(exc).__name__}."
+    except Exception as exc:  # Do not reveal broker-provided details in public logs.
+        last_error = str(exc)[:120] or f"{type(exc).__name__}."
     return {"ok": False, "error": last_error}
 
 
