@@ -185,6 +185,16 @@ def main() -> int:
         stage = "transfer"
         result = run_job(job)
         result["run_id"] = os.environ.get("GITHUB_RUN_ID", "")
+        if result.get("ok") is True:
+            candidate = str(result.get("pixeldrain_url") or "")
+            valid_url = bool(re.fullmatch(r"https://pixeldrain\.com/u/[A-Za-z0-9]+", candidate))
+            print(
+                "PixelDrain transfer summary: success; "
+                f"url_format_valid={valid_url}; "
+                f"size_present={isinstance(result.get('size_bytes'), int)}."
+            )
+        else:
+            print("PixelDrain transfer summary: failure; safe error code prepared for broker.")
         stage = "result_submission"
         broker_request("POST", args.broker_url, f"/v1/jobs/{args.job_id}/result", oidc_token, result)
         print("PixelDrain job completed." if result["ok"] else "PixelDrain job failed.")
