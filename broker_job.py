@@ -174,19 +174,27 @@ def run_job(job: dict[str, object]) -> dict[str, object]:
 
 def main() -> int:
     args = parse_args()
+    stage = "oidc"
     try:
         oidc_token = workflow_oidc_token(args.broker_url)
+        stage = "claim"
         job = broker_request(
             "POST", args.broker_url, f"/v1/jobs/{args.job_id}/claim", oidc_token,
             {"run_id": os.environ.get("GITHUB_RUN_ID", "")},
         )
+        stage = "transfer"
         result = run_job(job)
         result["run_id"] = os.environ.get("GITHUB_RUN_ID", "")
+        stage = "result_submission"
         broker_request("POST", args.broker_url, f"/v1/jobs/{args.job_id}/result", oidc_token, result)
         print("PixelDrain job completed." if result["ok"] else "PixelDrain job failed.")
         return 0 if result["ok"] else 1
     except Exception as exc:  # Do not reveal job data in public logs.
-        print(f"PixelDrain broker job failed: {type(exc).__name__}.", file=sys.stderr)
+        detail = str(exc).replace("\r", " ").replace("\n", " ")[:120]
+        print(
+            f"PixelDrain broker job failed during {stage}: {type(exc).__name__}: {detail}",
+            file=sys.stderr,
+        )
         return 1
 
 
