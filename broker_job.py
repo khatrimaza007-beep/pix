@@ -65,19 +65,7 @@ def broker_request(
         timeout=60,
     )
     if response.status_code >= 400:
-        detail = ""
-        if response.status_code == 400:
-            try:
-                value = response.json()
-                if isinstance(value, dict):
-                    shape = value.get("shape")
-                    if isinstance(shape, dict):
-                        detail = "; " + ", ".join(
-                            f"{key}={value}" for key, value in sorted(shape.items())
-                        )
-            except ValueError:
-                pass
-        raise RuntimeError(f"Broker returned HTTP {response.status_code}{detail}.")
+        raise RuntimeError(f"Broker returned HTTP {response.status_code}.")
     value = response.json()
     if not isinstance(value, dict):
         raise RuntimeError("Broker returned an invalid response.")
@@ -197,16 +185,6 @@ def main() -> int:
         stage = "transfer"
         result = run_job(job)
         result["run_id"] = os.environ.get("GITHUB_RUN_ID", "")
-        if result.get("ok") is True:
-            candidate = str(result.get("pixeldrain_url") or "")
-            valid_url = bool(re.fullmatch(r"https://pixeldrain\.com/u/[A-Za-z0-9]+", candidate))
-            print(
-                "PixelDrain transfer summary: success; "
-                f"url_format_valid={valid_url}; "
-                f"size_present={isinstance(result.get('size_bytes'), int)}."
-            )
-        else:
-            print("PixelDrain transfer summary: failure; safe error code prepared for broker.")
         stage = "result_submission"
         broker_request("POST", args.broker_url, f"/v1/jobs/{args.job_id}/result", oidc_token, result)
         print("PixelDrain job completed." if result["ok"] else "PixelDrain job failed.")
