@@ -4,17 +4,18 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import quote
 
 import requests
 
 MAX_UPLOAD_BYTES = 10_000_000_000
-CHUNK_BYTES = 1024 * 1024
+DOWNLOAD_TIMEOUT_SECONDS = 4 * 60 * 60
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,69 +72,67 @@ def broker_request(
     return value
 
 
+def safe_filename(filename: str) -> str:
+    return re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", filename)[:220] or "media"
+
+
+def stage_source(source_url: str, filename: str, directory: str) -> tuple[str, int]:
+    """Download before upload so sources without Content-Length work reliably."""
+    destination = os.path.join(directory, safe_filename(filename))
+    command = [
+        "aria2c",
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--file-allocation=none",
+        "--max-connection-per-server=1",
+        "--min-split-size=64M",
+        "--summary-interval=0",
+        "--console-log-level=warn",
+        "--timeout=60",
+        "--retry-wait=10",
+        "--max-tries=5",
+        "--dir",
+        directory,
+        "--out",
+        os.path.basename(destination),
+        source_url,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("source_download_failed") from exc
+    if completed.returncode != 0 or not os.path.isfile(destination):
+        raise RuntimeError("source_download_failed")
+    size = os.path.getsize(destination)
+    if not 0 < size <= MAX_UPLOAD_BYTES:
+        raise RuntimeError("Source exceeds the configured size limit.")
+    return destination, size
+
+
 def upload_once(source_url: str, filename: str, api_key: str) -> tuple[str, int]:
     mask(api_key)
-    try:
-        source_request = requests.get(
-            source_url,
-            stream=True,
-            allow_redirects=True,
-            headers={"Accept-Encoding": "identity", "User-Agent": "OpaquePixelDrainAction/1.0"},
-            timeout=(30, 300),
-        )
-        source_request.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError("source_download_failed") from exc
-    with source_request as source:
-        size = int(source.headers.get("Content-Length") or 0)
-        if size <= 0:
-            try:
-                probe = requests.get(
-                    source_url,
-                    headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
-                    allow_redirects=True,
-                    timeout=(30, 60),
-                )
-                content_range = probe.headers.get("Content-Range") or ""
-                match = re.search(r"/(\d+)$", content_range)
-                size = int(match.group(1)) if match else 0
-            except requests.RequestException:
-                size = 0
-        if size > MAX_UPLOAD_BYTES:
-            raise RuntimeError("Source exceeds the configured size limit.")
-        encoded_key = base64.b64encode(f":{api_key}".encode("utf-8")).decode("ascii")
-        safe_name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", filename)[:220] or "media"
-        def send_upload(body: object, content_length: int) -> requests.Response:
-            return requests.put(
-                f"https://pixeldrain.com/api/file/{quote(safe_name)}",
-                data=body,
-                headers={
-                    "Authorization": f"Basic {encoded_key}",
-                    "Content-Type": source.headers.get("Content-Type") or "application/octet-stream",
-                    "Content-Length": str(content_length),
-                    "Accept": "application/json",
-                    "User-Agent": "OpaquePixelDrainAction/1.0",
-                },
-                timeout=(30, 3600),
-            )
-
+    with tempfile.TemporaryDirectory(prefix="pixeldrain-") as directory:
+        staged_path, size = stage_source(source_url, filename, directory)
         try:
-            if size > 0:
-                response = send_upload(source.iter_content(chunk_size=CHUNK_BYTES), size)
-            else:
-                with tempfile.TemporaryFile() as staged:
-                    size = 0
-                    for chunk in source.iter_content(chunk_size=CHUNK_BYTES):
-                        if not chunk:
-                            continue
-                        size += len(chunk)
-                        if size > MAX_UPLOAD_BYTES:
-                            raise RuntimeError("Source exceeds the configured size limit.")
-                        staged.write(chunk)
-                    if size <= 0:
-                        raise RuntimeError("Source download was empty.")
-                    staged.seek(0)
-                    response = send_upload(staged, size)
+            with open(staged_path, "rb") as staged:
+                response = requests.put(
+                    f"https://pixeldrain.com/api/file/{quote(safe_filename(filename))}",
+                    auth=("", api_key),
+                    data=staged,
+                    headers={
+                        "Content-Length": str(size),
+                        "Content-Type": "application/octet-stream",
+                        "Accept": "application/json",
+                        "User-Agent": "OpaquePixelDrainAction/2.0",
+                    },
+                    timeout=(30, 4 * 60 * 60),
+                )
         except requests.RequestException as exc:
             raise RuntimeError("pixeldrain_upload_failed") from exc
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
@@ -154,11 +153,17 @@ def run_job(job: dict[str, object]) -> dict[str, object]:
     mask(source_url)
     mask(filename)
     last_error = "PixelDrain upload failed."
+    started = time.monotonic()
     for key in keys:
         try:
             url, size = upload_once(source_url, filename, key)
             mask(url)
-            return {"ok": True, "pixeldrain_url": url, "size_bytes": size}
+            return {
+                "ok": True,
+                "pixeldrain_url": url,
+                "size_bytes": size,
+                "elapsed_seconds": round(time.monotonic() - started, 2),
+            }
         except Exception as exc:  # Do not reveal provider responses in public logs.
             last_error = str(exc)[:120] or f"{type(exc).__name__}."
     return {"ok": False, "error": last_error}
